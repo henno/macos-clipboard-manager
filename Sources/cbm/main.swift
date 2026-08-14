@@ -23,6 +23,18 @@ if CommandLine.arguments.contains("--status") {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
+// `--appearance light|dark` overrides the system setting for this process only.
+// Meant for producing both halves of a theme-aware screenshot without switching
+// the whole machine's appearance to do it. Without it, cbm follows the system.
+if let index = CommandLine.arguments.firstIndex(of: "--appearance"),
+   index + 1 < CommandLine.arguments.count {
+    switch CommandLine.arguments[index + 1] {
+    case "light": app.appearance = NSAppearance(named: .aqua)
+    case "dark": app.appearance = NSAppearance(named: .darkAqua)
+    default: break
+    }
+}
+
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

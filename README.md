@@ -6,8 +6,11 @@ priority, and it shaped most of the decisions below.
 Press **⌘⌥C**, type a few characters, press **↵**. The entry goes back on the
 clipboard and is pasted into the app you came from.
 
-![The cbm panel: a search field, a list of clipboard entries with their source
-app icons, and a preview of the selected entry](docs/screenshot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-light.png">
+  <img alt="The cbm panel: a search field, a list of clipboard entries with their source app icons, and a preview of the selected entry" src="docs/screenshot-light.png">
+</picture>
 
 Text, rich text, images and file selections are all captured, with every
 pasteboard representation preserved, so pasting is lossless: formatting stays
@@ -282,6 +285,7 @@ The binary also takes a few arguments directly:
 | `--self-test` | run the logic tests and exit |
 | `--status` | print signing and permission state and exit |
 | `--show` | open the panel as soon as it launches |
+| `--appearance light\|dark` | override the system theme for this process only |
 
 And one environment variable:
 
@@ -289,11 +293,14 @@ And one environment variable:
 |---|---|
 | `CBM_DATA_DIR` | store the history somewhere else |
 
-Together those are how the screenshot above was produced — a throwaway history
-in a temporary directory, so nothing real had to be shown or moved:
+Together those are how the screenshots above were produced — a throwaway history
+in a temporary directory, so nothing real had to be shown or moved, and a
+per-process theme override, so taking the light and dark versions did not mean
+switching the whole machine's appearance twice:
 
 ```bash
-CBM_DATA_DIR=/tmp/cbm-demo ~/Applications/cbm.app/Contents/MacOS/cbm --show
+CBM_DATA_DIR=/tmp/cbm-demo ~/Applications/cbm.app/Contents/MacOS/cbm \
+    --appearance light --show
 ```
 
 ### Source map

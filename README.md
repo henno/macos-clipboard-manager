@@ -199,9 +199,17 @@ stale entry refers to a signature that no longer exists.
 ## How the idle cost is kept down
 
 `NSPasteboard` has no change notification, so every clipboard manager polls
-`changeCount`. That poll is a cross-process call, and what it really costs is
-not CPU percentage but **wakeups** — each one keeps the core out of its deep
-idle state. So:
+`changeCount`.
+
+The poll itself is close to free: measured at 0.46 µs per call in a warm loop,
+so even 50,000 polls — roughly a day of them — add up to about 0.02 s of CPU.
+That figure is a lower bound, since a poll every two seconds runs cold, but the
+end-to-end measurement below bounds it from the other side.
+
+So CPU time is not the thing worth optimising here. **Wakeups** are. Waking a
+core out of deep idle has a fixed cost no matter how little work follows, and
+polling is nothing but a reason to wake up. Everything below exists to reduce
+how often that happens, not to make each poll cheaper:
 
 - **Timer leeway.** A `DispatchSourceTimer` with 30 % leeway lets the kernel
   merge our wakeup with wakeups other processes already scheduled, which often

@@ -41,11 +41,24 @@ final class ItemStore {
                     """)
                 try Self.migrate(db)
                 self.db = db
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: Paths.database.path)
+                Self.restrictPermissions()
             } catch {
                 Log.error("store init failed: \(error)")
             }
+        }
+    }
+
+    /// The -wal sidecar holds recently written clipboard content and SQLite
+    /// creates it with the process umask, which is typically world-readable.
+    /// The containing directory is 0700 so this is not an open door on its own,
+    /// but for a file full of whatever the user has copied, one layer is not
+    /// enough. Re-applied after checkpoints, which can recreate the sidecars.
+    private static func restrictPermissions() {
+        let base = Paths.database.path
+        for path in [base, base + "-wal", base + "-shm"] {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: path)
         }
     }
 
@@ -434,7 +447,10 @@ final class ItemStore {
             deleteSync(ids: unique)
             Log.store("swept \(unique.count) items")
         }
-        if force { try? db.exec("PRAGMA wal_checkpoint(TRUNCATE)") }
+        if force {
+            try? db.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+            Self.restrictPermissions()
+        }
     }
 
     /// Removes blobs and thumbnails with no row pointing at them. Only worth

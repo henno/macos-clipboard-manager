@@ -418,9 +418,15 @@ extension PanelController: NSTextFieldDelegate {
             move(by: 1); return true
         case #selector(NSResponder.moveUp(_:)):
             move(by: -1); return true
-        case #selector(NSResponder.pageDown(_:)):
+        // Page Down/Up, and the Option+arrow equivalents a laptop keyboard sends
+        // instead (a single-line field editor reads those as paragraph motion).
+        case #selector(NSResponder.pageDown(_:)),
+             #selector(NSResponder.moveToEndOfParagraph(_:)),
+             #selector(NSResponder.moveToEndOfDocument(_:)):
             move(by: 8); return true
-        case #selector(NSResponder.pageUp(_:)):
+        case #selector(NSResponder.pageUp(_:)),
+             #selector(NSResponder.moveToBeginningOfParagraph(_:)),
+             #selector(NSResponder.moveToBeginningOfDocument(_:)):
             move(by: -8); return true
         case #selector(NSResponder.insertNewline(_:)):
             activate(mode: .paste); return true

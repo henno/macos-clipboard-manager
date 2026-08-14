@@ -67,7 +67,13 @@ enum RelativeTime {
     }()
 
     static func string(_ timestamp: Double) -> String {
-        formatter.localizedString(for: Date(timeIntervalSince1970: timestamp), relativeTo: Date())
+        let now = Date()
+        let date = Date(timeIntervalSince1970: timestamp)
+        // Something copied a moment ago rounds to "in 0 seconds" -- future tense
+        // for something that already happened. Say "now" and never let a
+        // timestamp a few milliseconds ahead of the clock leak through.
+        guard now.timeIntervalSince(date) >= 2 else { return "now" }
+        return formatter.localizedString(for: date, relativeTo: now)
     }
 }
 

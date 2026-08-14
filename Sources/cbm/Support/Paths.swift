@@ -2,7 +2,16 @@ import Foundation
 
 /// Everything cbm writes lives under one directory, created 0700.
 enum Paths {
+    /// `CBM_DATA_DIR` points the whole store somewhere else. Meant for testing
+    /// and for producing screenshots against a throwaway history, so neither has
+    /// to go anywhere near the real one.
     static let root: URL = {
+        if let override = ProcessInfo.processInfo.environment["CBM_DATA_DIR"], !override.isEmpty {
+            let dir = URL(fileURLWithPath: (override as NSString).expandingTildeInPath,
+                          isDirectory: true)
+            ensureDir(dir)
+            return dir
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("cbm", isDirectory: true)
         ensureDir(dir)

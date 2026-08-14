@@ -23,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
         askAboutLoginIfNeeded()
 
+        // `--show` opens the panel straight away, so cbm can be driven from a
+        // launcher, a script, or anything else that can run a command.
+        if CommandLine.arguments.contains("--show") {
+            PanelController.shared.show()
+        }
+
         Log.ui("launched")
     }
 

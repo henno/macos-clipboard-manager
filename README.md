@@ -6,6 +6,9 @@ priority, and it shaped most of the decisions below.
 Press **⌘⌥C**, type a few characters, press **↵**. The entry goes back on the
 clipboard and is pasted into the app you came from.
 
+![The cbm panel: a search field, a list of clipboard entries with their source
+app icons, and a preview of the selected entry](docs/screenshot.png)
+
 Text, rich text, images and file selections are all captured, with every
 pasteboard representation preserved, so pasting is lossless: formatting stays
 formatting, and a copied file pastes back into Finder as a file.
@@ -262,8 +265,28 @@ make cert     # create the stable signing identity (one time)
 make uninstall
 ```
 
-`CONFIG=debug make run` builds unoptimised. The app also accepts `--self-test`
-and `--status` directly.
+`CONFIG=debug make run` builds unoptimised.
+
+The binary also takes a few arguments directly:
+
+| | |
+|---|---|
+| `--self-test` | run the logic tests and exit |
+| `--status` | print signing and permission state and exit |
+| `--show` | open the panel as soon as it launches |
+
+And one environment variable:
+
+| | |
+|---|---|
+| `CBM_DATA_DIR` | store the history somewhere else |
+
+Together those are how the screenshot above was produced — a throwaway history
+in a temporary directory, so nothing real had to be shown or moved:
+
+```bash
+CBM_DATA_DIR=/tmp/cbm-demo ~/Applications/cbm.app/Contents/MacOS/cbm --show
+```
 
 ### Source map
 

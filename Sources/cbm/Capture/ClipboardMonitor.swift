@@ -46,6 +46,16 @@ final class ClipboardMonitor {
     private var lastActivity = CFAbsoluteTimeGetCurrent()
     private var paused = false
 
+    /// Writers set the clipboard in two steps: `clearContents()`, which bumps
+    /// changeCount straight away, and then the actual `setData`. A poll landing
+    /// in that gap sees an empty pasteboard, banks the new changeCount, and
+    /// would never look again -- the copy is silently lost. So when a change
+    /// turns out to be an empty pasteboard, re-read for a few more ticks without
+    /// waiting for another changeCount. The window is only a millisecond or two,
+    /// but the whole job of this app is not to miss copies.
+    private var emptyRechecksLeft = 0
+    private static let emptyRecheckLimit = 4
+
     private init() {}
 
     // MARK: - Lifecycle
@@ -88,16 +98,33 @@ final class ClipboardMonitor {
 
         let pb = NSPasteboard.general
         let count = pb.changeCount
+
         guard count != lastChangeCount else {
+            // Same changeCount, but we saw it mid-write last time: look again.
+            if emptyRechecksLeft > 0 {
+                emptyRechecksLeft -= 1
+                Metrics.shared.recordPasteboardRead()
+                if let payload = PasteboardReader.read(pb) {
+                    emptyRechecksLeft = 0
+                    ItemStore.shared.insert(payload)
+                }
+            }
             adjustCadence()
             return
         }
+
         lastChangeCount = count
         lastActivity = CFAbsoluteTimeGetCurrent()
         Metrics.shared.recordPasteboardRead()
 
         if let payload = PasteboardReader.read(pb) {
+            emptyRechecksLeft = 0
             ItemStore.shared.insert(payload)
+        } else {
+            // Nothing readable. If the pasteboard is outright empty the writer
+            // is probably still mid-write; if it merely held nothing we want
+            // (concealed, oversized) there is no point looking again.
+            emptyRechecksLeft = (pb.types?.isEmpty ?? true) ? Self.emptyRecheckLimit : 0
         }
         adjustCadence()
     }

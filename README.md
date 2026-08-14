@@ -306,3 +306,7 @@ exercised by hand, not automatically.
 ## Not in this version
 
 Pinned favourites, a per-app ignore list, snippets, sync, and encryption.
+
+## License
+
+[MIT](LICENSE) — © 2026 Henno Täht.

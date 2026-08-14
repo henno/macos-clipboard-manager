@@ -21,7 +21,7 @@ final class ItemStore {
 
     private static let columns = """
         id, hash, kind, snippet, source_bundle_id, source_name, \
-        created_at, updated_at, total_bytes, has_thumb, px_w, px_h
+        created_at, updated_at, total_bytes, has_thumb, px_w, px_h, source_host
         """
 
     private init() {
@@ -92,6 +92,86 @@ final class ItemStore {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_reps_blob ON reps(blob_key) WHERE blob_key IS NOT NULL;
             """)
+
+        let version = try userVersion(db)
+        if version < 1 {
+            // Added with favicons: the host a browser copy came from.
+            try? db.exec("ALTER TABLE items ADD COLUMN source_host TEXT")
+            try db.exec("PRAGMA user_version = 1")
+        }
+        if version < 2 {
+            try mergeOnContentIdentity(db)
+            try db.exec("PRAGMA user_version = 2")
+        }
+    }
+
+    /// Re-keys existing rows onto the content-only identity and folds together
+    /// what were previously separate entries. Before this, the same text copied
+    /// once from a web page and once from a plain field produced two rows,
+    /// because the hash covered every representation and one of them carried
+    /// HTML. Runs once.
+    private static func mergeOnContentIdentity(_ db: Database) throws {
+        var order: [(id: Int64, kind: ItemKind)] = []
+        let all = try db.statement("SELECT id, kind FROM items ORDER BY updated_at DESC")
+        while try all.step() {
+            order.append((all.int64(0), ItemKind(rawValue: all.int(1)) ?? .text))
+        }
+        guard !order.isEmpty else { return }
+
+        var winners: [(id: Int64, hash: String)] = []
+        var losers: [Int64] = []
+        var seen = Set<String>()
+
+        for row in order {
+            var reps: [Representation] = []
+            let q = try db.statement("SELECT uti, inline, blob_key FROM reps WHERE item_id = ?")
+            q.bind(1, row.id)
+            while try q.step() {
+                guard let uti = q.string(0) else { continue }
+                if let key = q.string(2) {
+                    if let data = BlobStore.read(key) { reps.append(Representation(uti: uti, data: data)) }
+                } else if let data = q.data(1) {
+                    reps.append(Representation(uti: uti, data: data))
+                }
+            }
+            guard !reps.isEmpty else { losers.append(row.id); continue }
+
+            let hash = BlobStore.contentIdentity(kind: row.kind, reps: reps)
+            // Rows arrive newest first, so the first one to claim a hash is the
+            // one worth keeping.
+            if seen.insert(hash).inserted {
+                winners.append((row.id, hash))
+            } else {
+                losers.append(row.id)
+            }
+        }
+
+        try db.transaction {
+            for id in losers {
+                let dr = try db.statement("DELETE FROM reps WHERE item_id = ?")
+                dr.bind(1, id); try dr.run()
+                let di = try db.statement("DELETE FROM items WHERE id = ?")
+                di.bind(1, id); try di.run()
+            }
+            // Park every hash on a unique placeholder first: a new hash may
+            // collide with some other row's old one mid-update, and the column
+            // is UNIQUE.
+            try db.exec("UPDATE items SET hash = 'migrating:' || id")
+            for w in winners {
+                let up = try db.statement("UPDATE items SET hash = ? WHERE id = ?")
+                up.bind(1, w.hash).bind(2, w.id)
+                try up.run()
+            }
+        }
+
+        if !losers.isEmpty {
+            Log.store("merged \(losers.count) duplicate entries on content identity")
+        }
+    }
+
+    private static func userVersion(_ db: Database) throws -> Int {
+        let q = try db.statement("PRAGMA user_version")
+        return try q.step() ? q.int(0) : 0
     }
 
     // MARK: - Writing
@@ -129,60 +209,72 @@ final class ItemStore {
         let now = Date().timeIntervalSince1970
 
         do {
-            // Already have these exact bytes? Move it to the top instead of
-            // creating a duplicate row.
+            // Large representations go to disk before we touch the database, so
+            // a failed write cannot leave a row pointing at a missing file.
+            let stored = storeBlobs(payload.reps)
+            guard !stored.isEmpty else { return .rejected }
+
+            // Seen this content before? Refresh the entry rather than adding a
+            // second row for it. The newest copy wins, so an entry that arrived
+            // once with formatting and once without ends up holding whichever
+            // was copied last — which is what pasting it should reproduce.
             let find = try db.statement("SELECT id FROM items WHERE hash = ?")
             find.bind(1, payload.hash)
             if try find.step() {
                 let id = find.int64(0)
-                let touch = try db.statement("UPDATE items SET updated_at = ? WHERE id = ?")
-                touch.bind(1, now).bind(2, id)
-                try touch.run()
+                let oldKeys = try blobKeys(of: id)
+                try db.transaction {
+                    let clear = try db.statement("DELETE FROM reps WHERE item_id = ?")
+                    clear.bind(1, id)
+                    try clear.run()
+                    try writeReps(itemID: id, stored)
+
+                    let upd = try db.statement(
+                        """
+                        UPDATE items SET updated_at = ?, kind = ?, snippet = ?,
+                            source_bundle_id = ?, source_name = ?, source_host = ?,
+                            total_bytes = ?, px_w = ?, px_h = ?
+                        WHERE id = ?
+                        """)
+                    upd.bind(1, now)
+                        .bind(2, payload.kind.rawValue)
+                        .bind(3, payload.snippet)
+                        .bind(4, payload.sourceBundleID)
+                        .bind(5, payload.sourceName)
+                        .bind(6, payload.sourceHost)
+                        .bind(7, payload.totalBytes)
+                        .bind(8, Int(payload.pixelSize?.width ?? 0))
+                        .bind(9, Int(payload.pixelSize?.height ?? 0))
+                        .bind(10, id)
+                    try upd.run()
+                }
+                try releaseUnreferenced(oldKeys)
                 return .touched(id: id, updatedAt: now)
             }
-
-            // Large representations go to disk before we touch the database, so
-            // a failed write cannot leave a row pointing at a missing file.
-            var stored: [(uti: String, bytes: Int, inline: Data?, key: String?)] = []
-            stored.reserveCapacity(payload.reps.count)
-            for rep in payload.reps {
-                if rep.data.count > BlobStore.inlineLimit {
-                    guard let key = BlobStore.write(rep.data) else { continue }
-                    stored.append((rep.uti, rep.data.count, nil, key))
-                } else {
-                    stored.append((rep.uti, rep.data.count, rep.data, nil))
-                }
-            }
-            guard !stored.isEmpty else { return .rejected }
 
             var newID: Int64 = 0
             try db.transaction {
                 let ins = try db.statement(
                     """
                     INSERT INTO items
-                        (hash, kind, snippet, source_bundle_id, source_name,
+                        (hash, kind, snippet, source_bundle_id, source_name, source_host,
                          created_at, updated_at, total_bytes, has_thumb, px_w, px_h)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """)
                 ins.bind(1, payload.hash)
                     .bind(2, payload.kind.rawValue)
                     .bind(3, payload.snippet)
                     .bind(4, payload.sourceBundleID)
                     .bind(5, payload.sourceName)
-                    .bind(6, now)
+                    .bind(6, payload.sourceHost)
                     .bind(7, now)
-                    .bind(8, payload.totalBytes)
-                    .bind(9, Int(payload.pixelSize?.width ?? 0))
-                    .bind(10, Int(payload.pixelSize?.height ?? 0))
+                    .bind(8, now)
+                    .bind(9, payload.totalBytes)
+                    .bind(10, Int(payload.pixelSize?.width ?? 0))
+                    .bind(11, Int(payload.pixelSize?.height ?? 0))
                 try ins.run()
                 newID = db.lastInsertRowID
-
-                for s in stored {
-                    let r = try db.statement(
-                        "INSERT OR REPLACE INTO reps (item_id, uti, bytes, inline, blob_key) VALUES (?, ?, ?, ?, ?)")
-                    r.bind(1, newID).bind(2, s.uti).bind(3, s.bytes).bind(4, s.inline).bind(5, s.key)
-                    try r.run()
-                }
+                try writeReps(itemID: newID, stored)
             }
 
             // Thumbnail last: it is the slowest step and a failure here must not
@@ -204,6 +296,7 @@ final class ItemStore {
                 snippet: payload.snippet,
                 sourceBundleID: payload.sourceBundleID,
                 sourceName: payload.sourceName,
+                sourceHost: payload.sourceHost,
                 createdAt: now,
                 updatedAt: now,
                 totalBytes: Int64(payload.totalBytes),
@@ -216,6 +309,54 @@ final class ItemStore {
         } catch {
             Log.error("insert failed: \(error)")
             return .rejected
+        }
+    }
+
+    private typealias StoredRep = (uti: String, bytes: Int, inline: Data?, key: String?)
+
+    /// Writes anything over the inline limit out to a file first, so a failed
+    /// write can never leave a row pointing at a blob that is not there.
+    private func storeBlobs(_ reps: [Representation]) -> [StoredRep] {
+        var stored: [StoredRep] = []
+        stored.reserveCapacity(reps.count)
+        for rep in reps {
+            if rep.data.count > BlobStore.inlineLimit {
+                guard let key = BlobStore.write(rep.data) else { continue }
+                stored.append((rep.uti, rep.data.count, nil, key))
+            } else {
+                stored.append((rep.uti, rep.data.count, rep.data, nil))
+            }
+        }
+        return stored
+    }
+
+    private func writeReps(itemID: Int64, _ stored: [StoredRep]) throws {
+        guard let db else { return }
+        for s in stored {
+            let r = try db.statement(
+                "INSERT OR REPLACE INTO reps (item_id, uti, bytes, inline, blob_key) VALUES (?, ?, ?, ?, ?)")
+            r.bind(1, itemID).bind(2, s.uti).bind(3, s.bytes).bind(4, s.inline).bind(5, s.key)
+            try r.run()
+        }
+    }
+
+    private func blobKeys(of id: Int64) throws -> Set<String> {
+        guard let db else { return [] }
+        let q = try db.statement("SELECT blob_key FROM reps WHERE item_id = ? AND blob_key IS NOT NULL")
+        q.bind(1, id)
+        var keys = Set<String>()
+        while try q.step() { if let k = q.string(0) { keys.insert(k) } }
+        return keys
+    }
+
+    /// A blob can be shared by several entries; only drop it once the last
+    /// reference is gone.
+    private func releaseUnreferenced(_ keys: Set<String>) throws {
+        guard let db, !keys.isEmpty else { return }
+        for key in keys {
+            let q = try db.statement("SELECT 1 FROM reps WHERE blob_key = ? LIMIT 1")
+            q.bind(1, key)
+            if try q.step() == false { BlobStore.delete(key) }
         }
     }
 
@@ -389,6 +530,7 @@ final class ItemStore {
             snippet: q.string(3) ?? "",
             sourceBundleID: q.string(4),
             sourceName: q.string(5),
+            sourceHost: q.string(12),
             createdAt: q.double(6),
             updatedAt: q.double(7),
             totalBytes: q.int64(8),

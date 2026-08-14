@@ -26,6 +26,11 @@ enum PasteboardReader {
     private static let textTypes: [NSPasteboard.PasteboardType] = [.string, .rtf, .html]
     private static let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
 
+    /// Chromium writes the page a copy came from here. Chrome, Edge, Brave, Arc
+    /// and Opera all share it; Safari offers nothing equivalent, so copies from
+    /// Safari keep the application icon.
+    private static let chromiumSourceURL = NSPasteboard.PasteboardType("org.chromium.source-url")
+
     static func read(_ pb: NSPasteboard) -> CapturedPayload? {
         guard let available = pb.types, !available.isEmpty else { return nil }
         if available.contains(where: { ignoredTypes.contains($0.rawValue) }) {
@@ -98,10 +103,24 @@ enum PasteboardReader {
             snippet: snippet,
             sourceBundleID: front.bundleID,
             sourceName: front.name,
-            hash: BlobStore.identity(of: reps),
+            sourceHost: readSourceHost(pb),
+            hash: BlobStore.contentIdentity(kind: kind, reps: reps),
             totalBytes: reps.reduce(0) { $0 + $1.data.count },
             pixelSize: pixelSize,
             imageForThumb: imageData)
+    }
+
+    /// Keeps only the host. A full URL would turn the history into a log of
+    /// every page the user has copied from, which is a much heavier thing to
+    /// store than what is needed to show a favicon.
+    private static func readSourceHost(_ pb: NSPasteboard) -> String? {
+        guard let raw = pb.string(forType: chromiumSourceURL),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty
+        else { return nil }
+        return host.lowercased()
     }
 
     private static func readFileURLs(_ pb: NSPasteboard) -> [URL] {

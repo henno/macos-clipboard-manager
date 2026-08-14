@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import CryptoKit
 
 /// Payloads larger than `inlineLimit` live as files on disk keyed by their
@@ -17,6 +17,47 @@ enum BlobStore {
             out += String(format: "%02x", byte)
         }
         return out
+    }
+
+    /// The identity used to recognise "the same thing copied again".
+    ///
+    /// Only the payload that carries the meaning counts: the plain text, the
+    /// image bytes, the list of files. Hashing every representation instead
+    /// would split one entry in two whenever the same text arrives once with
+    /// formatting attached and once without — which is exactly what a user
+    /// reads as a duplicate.
+    ///
+    /// Rich text and plain text share a class deliberately, so copying the same
+    /// sentence from a web page and from a text editor lands on one entry.
+    static func contentIdentity(kind: ItemKind, reps: [Representation]) -> String {
+        let cls: String
+        let candidates: [String]
+        switch kind {
+        case .files:
+            cls = "files"
+            candidates = [PasteboardReader.fileListType.rawValue]
+        case .image:
+            cls = "image"
+            candidates = [NSPasteboard.PasteboardType.png.rawValue,
+                          NSPasteboard.PasteboardType.tiff.rawValue]
+        case .text, .rich:
+            cls = "text"
+            candidates = [NSPasteboard.PasteboardType.string.rawValue]
+        }
+
+        for uti in candidates {
+            guard let rep = reps.first(where: { $0.uti == uti }) else { continue }
+            var hasher = SHA256()
+            hasher.update(data: Data(cls.utf8))
+            hasher.update(data: rep.data)
+            var out = ""
+            out.reserveCapacity(64)
+            for byte in hasher.finalize() { out += String(format: "%02x", byte) }
+            return out
+        }
+        // Nothing recognisable to key on: fall back to the whole set, which at
+        // worst behaves the way this used to.
+        return identity(of: reps)
     }
 
     /// Hashes an ordered set of representations into one stable identity. The

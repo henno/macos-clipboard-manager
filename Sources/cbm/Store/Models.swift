@@ -31,6 +31,10 @@ struct ClipItem {
     let snippet: String
     let sourceBundleID: String?
     let sourceName: String?
+    /// Host of the page this came from, when a browser told us. Only the host is
+    /// kept, never the full URL — enough to show a favicon, far less revealing
+    /// than a record of every page you have ever copied from.
+    let sourceHost: String?
     let createdAt: Double
     let updatedAt: Double
     let totalBytes: Int64
@@ -46,6 +50,7 @@ struct CapturedPayload {
     let snippet: String
     let sourceBundleID: String?
     let sourceName: String?
+    let sourceHost: String?
     let hash: String
     let totalBytes: Int
     let pixelSize: CGSize?

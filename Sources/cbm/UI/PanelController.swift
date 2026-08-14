@@ -26,6 +26,7 @@ final class PanelController: NSObject {
     private var hits: [SearchHit] = []
     private var pasteTarget: NSRunningApplication?
     private var indexLoaded = false
+    private var shownAt = Date.distantPast
 
     private override init() {
         super.init()
@@ -53,6 +54,7 @@ final class PanelController: NSObject {
         runSearch("")
         position(window)
 
+        shownAt = Date()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(searchField)
@@ -86,7 +88,21 @@ final class PanelController: NSObject {
     private func loadIndexIfNeeded() {
         guard !indexLoaded else { return }
         indexLoaded = true
-        SearchIndex.shared.rebuild(from: ItemStore.shared.recent())
+        let items = ItemStore.shared.recent()
+        SearchIndex.shared.rebuild(from: items)
+        warmFavicons(for: items)
+    }
+
+    /// Favicon lookup reads a database, so it happens off the main thread and
+    /// the list redraws once the icons are in hand. Until then rows show the
+    /// application icon, which is what they showed before this existed.
+    private func warmFavicons(for items: [ClipItem]) {
+        let hosts = Set(items.compactMap(\.sourceHost))
+        guard !hosts.isEmpty else { return }
+        FaviconStore.shared.warm(hosts: hosts) { [weak self] foundAny in
+            guard foundAny, let self, self.isVisible else { return }
+            self.tableView.reloadData()
+        }
     }
 
     // MARK: - Construction
@@ -191,6 +207,13 @@ final class PanelController: NSObject {
         window.onCancel = { [weak self] in self?.dismiss() }
         window.onResignKey = { [weak self] in
             guard let self, self.isVisible else { return }
+            // Losing focus normally means the user clicked elsewhere, and the
+            // panel should get out of the way. But a window can also resign key
+            // in the same breath as it appears — when the app was launched into
+            // the background, or something else grabs focus just then — and a
+            // panel that closes the instant it opens is useless. Ignore the
+            // first moment.
+            guard Date().timeIntervalSince(self.shownAt) > 0.4 else { return }
             self.window?.orderOut(nil)
         }
 
@@ -225,6 +248,7 @@ final class PanelController: NSObject {
     func storeDidInsert(_ item: ClipItem) {
         guard indexLoaded else { return }
         SearchIndex.shared.insert(item)
+        warmFavicons(for: [item])
         refreshIfVisible()
     }
 

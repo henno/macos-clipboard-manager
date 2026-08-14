@@ -70,8 +70,12 @@ final class ItemRowView: NSTableCellView {
         guard let item else { return }
         let selected = backgroundStyle == .emphasized
 
+        // A thumbnail says more than any icon; a site's favicon says more than
+        // the browser's own icon, which would be identical on every row.
         if item.kind == .image, item.hasThumb, let thumb = ThumbCache.shared.thumbnail(forHash: item.hash) {
             iconView.image = thumb
+        } else if let favicon = FaviconStore.shared.icon(forHost: item.sourceHost) {
+            iconView.image = favicon
         } else {
             iconView.image = AppIconCache.shared.icon(bundleID: item.sourceBundleID)
         }

@@ -22,6 +22,7 @@ enum SelfTest {
         boundaries()
         matching()
         searchIndex()
+        contentIdentity()
 
         print("")
         if failures == 0 {
@@ -65,7 +66,7 @@ enum SelfTest {
     private static func item(_ id: Int64, _ snippet: String, app: String? = nil) -> ClipItem {
         ClipItem(
             id: id, hash: "h\(id)", kind: .text, snippet: snippet,
-            sourceBundleID: app.map { "bundle.\($0)" }, sourceName: app,
+            sourceBundleID: app.map { "bundle.\($0)" }, sourceName: app, sourceHost: nil,
             createdAt: Double(id), updatedAt: Double(id),
             totalBytes: Int64(snippet.utf8.count),
             hasThumb: false, pixelWidth: 0, pixelHeight: 0)
@@ -144,6 +145,56 @@ enum SelfTest {
             text: TextFold.fold(text),
             boundaries: TextFold.boundaries(original: text))
         check("positions are reported", m?.positions == [0, 1, 2], String(describing: m?.positions))
+    }
+
+    private static func contentIdentity() {
+        section("duplicate detection")
+
+        func rep(_ uti: String, _ text: String) -> Representation {
+            Representation(uti: uti, data: Data(text.utf8))
+        }
+        let plain = "public.utf8-plain-text"
+        let html = "public.html"
+        let rtf = "public.rtf"
+        let png = "public.png"
+        let files = PasteboardReader.fileListType.rawValue
+
+        // The case that started this: the same string copied once from a web
+        // page (carrying HTML) and once from a plain field must be one entry.
+        let withMarkup = BlobStore.contentIdentity(
+            kind: .rich, reps: [rep(plain, "93DVYA"), rep(html, "<span>93DVYA</span>")])
+        let bare = BlobStore.contentIdentity(kind: .text, reps: [rep(plain, "93DVYA")])
+        check("same text with and without markup is one entry", withMarkup == bare)
+
+        let otherMarkup = BlobStore.contentIdentity(
+            kind: .rich, reps: [rep(plain, "93DVYA"), rep(rtf, "totally different rtf")])
+        check("the markup itself does not affect identity", withMarkup == otherMarkup)
+
+        check("different text stays separate",
+              bare != BlobStore.contentIdentity(kind: .text, reps: [rep(plain, "93DVYB")]))
+
+        // Two screenshots of identical dimensions produce the same snippet, so
+        // only the bytes can tell them apart.
+        let imageA = BlobStore.contentIdentity(kind: .image, reps: [rep(png, "bytes-A")])
+        let imageB = BlobStore.contentIdentity(kind: .image, reps: [rep(png, "bytes-B")])
+        check("different images stay separate", imageA != imageB)
+        check("the same image is one entry",
+              imageA == BlobStore.contentIdentity(kind: .image, reps: [rep(png, "bytes-A")]))
+
+        // A Finder copy also carries the path as text; a copy of the same file
+        // from elsewhere may not. Both are the same file.
+        let fromFinder = BlobStore.contentIdentity(
+            kind: .files, reps: [rep(files, "file:///a.png"), rep(plain, "/a.png")])
+        let fromElsewhere = BlobStore.contentIdentity(kind: .files, reps: [rep(files, "file:///a.png")])
+        check("same file from different apps is one entry", fromFinder == fromElsewhere)
+
+        // Identical bytes in different roles must not collide.
+        check("a filename and the same text are separate entries",
+              BlobStore.contentIdentity(kind: .files, reps: [rep(files, "x")])
+                  != BlobStore.contentIdentity(kind: .text, reps: [rep(plain, "x")]))
+
+        check("an entry with nothing recognisable still gets an identity",
+              !BlobStore.contentIdentity(kind: .text, reps: [rep("some.odd.uti", "x")]).isEmpty)
     }
 
     private static func searchIndex() {

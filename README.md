@@ -14,7 +14,9 @@ clipboard and is pasted into the app you came from.
 
 Text, rich text, images and file selections are all captured, with every
 pasteboard representation preserved, so pasting is lossless: formatting stays
-formatting, and a copied file pastes back into Finder as a file.
+formatting, and a copied file pastes back into Finder as a file. Entries copied
+from a Chromium browser show the site's favicon rather than the browser's icon,
+which would be the same on every row.
 
 ## Requirements
 
@@ -122,10 +124,24 @@ retention sweep over what is already stored.
 
 ```
 ~/Library/Application Support/cbm/
-  history.sqlite3   metadata, plus any payload under 64 KiB
-  blobs/            larger payloads, keyed by SHA-256 and deduplicated
-  thumbs/           256px thumbnails
+  history.sqlite3     metadata, plus any payload under 64 KiB
+  blobs/              larger payloads, keyed by SHA-256 and deduplicated
+  thumbs/             256px thumbnails
+  chrome-favicons.db  a copy of Chrome's favicon cache, refreshed at most
+                      every ten minutes and read rather than written
 ```
+
+### Duplicates
+
+Copying something you already have moves the existing entry to the top instead
+of adding a second one. What counts as "the same" is the content alone — the
+text, the image bytes, the list of files — not the full set of pasteboard
+representations. Copying one sentence from a web page and then from a plain
+text field gives one entry, not two, even though the first carried HTML along
+with it. The most recent copy wins, so pasting reproduces what you copied last.
+
+Two screenshots with identical dimensions still count as two entries: their
+bytes differ, which is the only thing that can tell them apart.
 
 Directories are `0700`, files `0600` — including the SQLite `-wal` sidecar,
 which holds recently written content and which SQLite would otherwise create
@@ -145,7 +161,16 @@ make uninstall && rm -rf ~/Library/"Application Support"/cbm
 would make search unusable while giving nothing against an attacker who can
 already read your home directory.
 
-**Nothing leaves the machine.** No network code, no analytics, no sync.
+**Nothing leaves the machine.** No network code, no analytics, no sync — and
+that includes favicons. Chrome already keeps a favicon database on disk, so cbm
+reads a copy of that instead of fetching icons, which would tell every site you
+copy from that you just did so, and when.
+
+**Only the host is stored, never the URL.** Chromium browsers put the source
+page on the clipboard alongside the content; cbm keeps `github.com` and throws
+the rest away. Storing full URLs would turn the history into a log of every page
+you have ever copied from, which is a far heavier thing to keep than what a
+favicon needs. Safari offers no equivalent, so Safari entries show the app icon.
 
 **Password managers are skipped** — with a caveat worth understanding. There is
 a convention where an app marks a clipboard write as sensitive with

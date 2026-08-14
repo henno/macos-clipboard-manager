@@ -57,7 +57,7 @@ final class SearchIndex {
         let i = entry.item
         entry.item = ClipItem(
             id: i.id, hash: i.hash, kind: i.kind, snippet: i.snippet,
-            sourceBundleID: i.sourceBundleID, sourceName: i.sourceName,
+            sourceBundleID: i.sourceBundleID, sourceName: i.sourceName, sourceHost: i.sourceHost,
             createdAt: i.createdAt, updatedAt: updatedAt, totalBytes: i.totalBytes,
             hasThumb: i.hasThumb, pixelWidth: i.pixelWidth, pixelHeight: i.pixelHeight)
         entries.insert(entry, at: 0)

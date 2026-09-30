@@ -431,6 +431,40 @@ final class ItemStore {
 
     // MARK: - Reading
 
+    /// Only text payloads are read when preparing search, never image bytes or
+    /// rich-text markup. Existing history needs no migration: its plain-text
+    /// representation is already complete, whether inline or in a blob.
+    func searchableTexts(for items: [ClipItem]) -> [Int64: String] {
+        queue.sync {
+            guard let db else { return [:] }
+            do { return try Self.loadSearchableTexts(db, items: items) }
+            catch { Log.error("search text load failed: \(error)"); return [:] }
+        }
+    }
+
+    static func loadSearchableTexts(
+        _ db: Database, items: [ClipItem], readBlob: (String) -> Data? = BlobStore.read
+    ) throws -> [Int64: String] {
+        let ids = Set(items.filter { $0.kind == .text || $0.kind == .rich }.map(\.id))
+        guard !ids.isEmpty else { return [:] }
+        let sql = ids.count == 1
+            ? "SELECT item_id, inline, blob_key FROM reps WHERE uti = ? AND item_id = ?"
+            : "SELECT item_id, inline, blob_key FROM reps WHERE uti = ?"
+        let query = try db.statement(sql)
+        query.bind(1, "public.utf8-plain-text")
+        if ids.count == 1 { query.bind(2, ids.first!) }
+        var texts: [Int64: String] = [:]
+        while try query.step() {
+            let id = query.int64(0)
+            guard ids.contains(id) else { continue }
+            let data = query.string(2).flatMap(readBlob) ?? query.data(1)
+            if let data, let text = String(data: data, encoding: .utf8) {
+                texts[id] = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return texts
+    }
+
     func recent(limit: Int = 5000) -> [ClipItem] {
         queue.sync {
             guard let db else { return [] }

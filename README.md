@@ -75,7 +75,7 @@ Settings — and see [Troubleshooting](#troubleshooting).
 | Key | Action |
 |---|---|
 | ⌘⌥C | open the panel (press again to close) |
-| type | fuzzy search |
+| type | search full clipboard text |
 | ↑ ↓ | move through results |
 | ⌥↑ ⌥↓ | jump eight rows (Page Up/Down do the same) |
 | ↵ | paste into the app you came from |
@@ -89,13 +89,19 @@ Settings — and see [Troubleshooting](#troubleshooting).
 
 ### Search
 
-Matching is a fuzzy subsequence, ranked: `gthb` finds `github.com`, and matches
-at word starts and in consecutive runs rank above scattered ones. Case and
-Estonian diacritics are folded, so `arkas` will not find `Ärkas` but `ärkas`
-and `ÄRKAS` both will.
+Each search term must occur consecutively. Word parts are allowed: `kool`
+finds `koolimaja`, but does not match `k o o l`. Search covers the complete
+saved plain text, including text beyond the short label shown in the list.
+An entry matching beyond that label shows context around the match.
+
+Matching ignores case and allows diacritic differences: `oun` finds both
+`oun` and `õun`. Results rank by exact spelling (ignoring case), then the
+number of whole-word matches, then the smallest span containing all the
+terms. Equally relevant results show the most recently copied entries first.
 
 Multiple words are separate terms and all of them must match, in any order:
-`git commit` matches an entry containing both.
+`valge aed` matches `valge maja ja aed` and `aed ja valge`. Punctuation is
+literal; tabs and newlines also separate query terms.
 
 `app:` narrows by source application and combines with terms:
 
@@ -252,25 +258,36 @@ how often that happens, not to make each poll cheaper:
   is pressed for the first time.
 - **No vibrancy.** The translucent launcher look makes the window server blur
   everything behind the panel on every frame it is open.
-- **Bounded caches.** 8 MB of thumbnails, a 2 MB SQLite page cache, 256-byte
-  searchable snippets. Full-size images are read for the preview and the paste,
-  never for the list.
+- **Bounded image caches.** 8 MB of thumbnails and a 2 MB SQLite page cache.
+  List labels remain capped at 256 bytes. Full-size images are read for the
+  preview and the paste, never for search or the list.
+
+Full plain text is loaded once on the first panel open and normalized in the
+search index. New text is prepared when an entry is added. Existing saved
+history works without a database migration. Typing never reloads payloads
+from disk. Memory use and first-open preparation time grow with the total
+saved text, rather than only the short labels; the index size is shown in
+Settings. Missing or unavailable text representations fall back to the label.
 
 Search stays instant through a per-entry character bitmask that rejects most
 candidates with a single AND, and through incremental narrowing: a growing query
-rescores only the previous result set. That is exact rather than approximate,
-because adding a character to a subsequence query can only remove matches, never
-add them.
+rescores only the previous result set when each previous normalized term is
+still a prefix of the corresponding new term. Edits that can widen results
+scan the complete index again. Substring scans use linear-time iterators, so
+repeated matches in long text do not allocate a list of every occurrence.
 
 ## Measured
 
-On an Apple Silicon Mac, this build:
+On an Apple Silicon Mac, the original snippet-only search build measured:
 
 | | |
 |---|---|
 | Memory, before the panel is ever opened | **13.4 MB** |
 | Memory, after opening the panel once | **~27 MB** |
 | CPU while idle | **0.01 s over 120 s — under 0.01 %** |
+
+Full-text search adds memory proportional to the retained text; the figures
+above are a baseline, not a memory bound for the full-text index.
 
 Memory is `phys_footprint`, the number Activity Monitor shows under Memory. The
 `RSS` reported by `ps` is roughly 70 MB, but most of that is framework pages
@@ -334,17 +351,18 @@ CBM_DATA_DIR=/tmp/cbm-demo ~/Applications/cbm.app/Contents/MacOS/cbm \
 |---|---|
 | `Capture/` | pasteboard polling, reading, thumbnailing, source attribution |
 | `Store/` | SQLite wrapper, item store, blob store, retention |
-| `Search/` | case folding, fuzzy matcher, in-memory index |
+| `Search/` | normalization, contiguous matching, relevance ranking, in-memory index |
 | `UI/` | panel, row and preview views, menu bar, settings, hotkey |
 | `Paste/` | putting an entry back and synthesising ⌘V |
 | `Support/` | settings, paths, metrics, logging, code-signature checks |
 
 ### Tests
 
-`make test` runs 41 checks over the parts where a subtle mistake shows up as
+`make test` runs checks over the parts where a subtle mistake shows up as
 "search feels wrong" rather than a crash: byte-preserving case folding, the mask
-prefilter, word-boundary detection, match ranking, and the search index —
-including a check that incremental narrowing returns exactly what a cold search
+prefilter, word-boundary detection, contiguous matching, diacritic handling,
+match ranking, full-text storage loading, Unicode highlighting, and the search
+index — including checks that incremental narrowing returns exactly what a cold search
 returns.
 
 They live in the app binary behind `--self-test` rather than in a test bundle,

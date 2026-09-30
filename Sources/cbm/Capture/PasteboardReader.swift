@@ -133,9 +133,8 @@ enum PasteboardReader {
         return urls
     }
 
-    /// The snippet is both the list label and the entire searchable text, so it
-    /// is capped rather than unbounded -- 256 bytes is enough to recognise an
-    /// entry and cheap enough to keep thousands of them resident.
+    /// A bounded list label. Search separately prepares the complete saved
+    /// plain-text representation, so this limit never truncates search results.
     private static let snippetLimit = 256
 
     private static func makeSnippet(

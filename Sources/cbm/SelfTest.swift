@@ -22,6 +22,8 @@ enum SelfTest {
         boundaries()
         matching()
         searchIndex()
+        contiguousSearch()
+        searchStorage()
         contentIdentity()
 
         print("")
@@ -201,6 +203,10 @@ enum SelfTest {
         section("search index")
         let index = SearchIndex.shared
 
+        index.rebuild(from: [item(2, "k o o l"), item(1, "koolimaja")])
+        check("search rejects scattered letters and accepts word parts",
+              index.search("kool").map(\.item.id) == [1])
+
         index.rebuild(from: [item(3, "third"), item(2, "second"), item(1, "first")])
         check("empty query returns everything newest first",
               index.search("").map(\.item.id) == [3, 2, 1])
@@ -212,7 +218,9 @@ enum SelfTest {
         ])
         let ranked = index.search("github").map(\.item.id)
         check("non-matching entries are dropped", Set(ranked) == [1, 2], "\(ranked)")
-        check("word-start match ranks first", ranked.first == 1, "\(ranked)")
+        // Both occurrences are exact whole words. The new relevance contract
+        // breaks this tie by recency rather than by offset within the entry.
+        check("equally relevant matches use recency", ranked.first == 2, "\(ranked)")
 
         index.rebuild(from: [item(2, "git commit message"), item(1, "git push")])
         check("every term must match", index.search("git commit").map(\.item.id) == [2])
@@ -251,5 +259,146 @@ enum SelfTest {
         check("remove drops an entry", index.search("").map(\.item.id) == [1])
 
         index.rebuild(from: [])
+    }
+
+    private static func contiguousSearch() {
+        section("contiguous full-text search")
+        let index = SearchIndex.shared
+        func ids(_ query: String) -> [Int64] { index.search(query).map(\.item.id) }
+
+        index.rebuild(from: [item(3, "k l a a b u d"), item(2, "klaabude"), item(1, "klaabud")])
+        check("screenshot query excludes scattered letters", ids("klaabud") == [1, 2])
+        check("whole word outranks a newer word part", ids("klaabud").first == 1)
+        index.rebuild(from: [item(3, "valge"), item(2, "aed ja valge"), item(1, "valge maja ja aed")])
+        check("terms match in either order with intervening words", Set(ids("valge aed")) == [1, 2])
+        check("tabs and newlines separate query terms", ids("valge\taed\n") == ids("valge aed"))
+        check("repeated query terms do not require repeated text", ids("valge valge") == ids("valge"))
+        index.rebuild(from: [item(2, "a.b"), item(1, "axb")])
+        check("punctuation in terms is literal", ids("a.b") == [2])
+
+        index.rebuild(from: [item(3, "õun"), item(2, "oun"), item(1, "ÕUN")])
+        check("plain query allows accented variants but exact spelling ranks first", ids("oun") == [2, 3, 1])
+        check("accented query prefers accented spelling", ids("õun") == [3, 1, 2])
+        check("uppercase query is case insensitive", ids("ÕUN") == ids("õun"))
+        index.rebuild(from: [item(2, "õun"), item(1, "ounapuu")])
+        check("exact spelling outranks a diacritic variant whole word", ids("oun") == [1, 2])
+        index.rebuild(from: [item(1, "ÕÄÖÜ ŠŽ café")])
+        check("all Estonian diacritics and other accents are optional", ids("oaou sz cafe") == [1])
+
+        index.rebuild(from: [item(2, "valge maja ja aed"), item(1, "valge aed")])
+        check("closer terms outrank newer distant terms", ids("valge aed") == [1, 2])
+        index.rebuild(from: [item(2, "valge maja ja aed"), item(1, "valge väga kaugel aed; siis valge aed")])
+        check("proximity uses later occurrences when they form a better window", ids("valge aed") == [1, 2])
+        index.rebuild(from: [item(3, "valge aednik"), item(2, "valgem aed"), item(1, "valge aed")])
+        check("whole-word count ranks ahead of word parts", ids("valge aed").first == 1)
+        index.rebuild(from: [item(2, "õun oun"), item(1, "oun")])
+        check("an exact match later in the text wins over an earlier loose match", ids("oun") == [2, 1])
+        check("highlighting shows complete contiguous matches",
+              index.highlightPositions(for: index.search("oun")[0]) == Array(0..<4) + Array(5..<8))
+
+        let unicode = "🙂 Õun ja õun"
+        index.rebuild(from: [item(1, unicode)])
+        let highlights = index.highlightPositions(for: index.search("oun")[0])
+        check("highlight offsets survive emoji and accent folding", highlights == Array(5..<9) + Array(13..<17), "\(highlights)")
+        let decomposed = "O\u{0303}UN"
+        index.rebuild(from: [item(2, "õun"), item(1, decomposed)])
+        check("canonically equivalent accents rank equally", ids("õun") == [2, 1])
+        check("decomposed accents keep their original highlight range",
+              index.highlightPositions(for: index.search("õun")[1]) == Array(0..<decomposed.utf8.count))
+        let expanded = SearchText("ßa")
+        check("same-length Unicode expansions map partial matches to complete characters",
+              expanded.originalRange(1..<3) == 0..<3 && expanded.originalRange(0..<1) == 0..<2)
+        index.rebuild(from: [item(1, "straße")])
+        check("case folding supports expanded Unicode characters", ids("STRASSE") == [1])
+        index.rebuild(from: [item(2, "日本õun語"), item(1, "õun")])
+        check("Unicode letters form word boundaries correctly", ids("oun").first == 1)
+
+        let long = String(repeating: "algus ", count: 150) + "🙂 ÕUN valge maja ja aed"
+        index.rebuild(from: [item(1, "algus")], texts: [1: long])
+        check("search includes text beyond the old 256-byte label", ids("oun aed") == [1])
+        let hit = index.search("oun")[0]
+        let display = index.display(for: hit)
+        check("a distant hit displays matching context", display.text.contains("ÕUN") && display.text.hasPrefix("… "))
+        let normalizedLabel = SearchText(display.text)
+        check("context highlights map to the matching original characters",
+              display.positions == SubstringMatcher.highlightPositions(terms: [SearchTerm("oun")], text: normalizedLabel)
+                  && !display.positions.isEmpty)
+        check("a context label never replaces the stored item snippet", hit.item.snippet == "algus")
+        index.touch(id: 1, updatedAt: 99)
+        check("touch preserves the full search text", ids("oun aed") == [1])
+        index.insert(item(2, "short"), text: "new text ending in klaabud")
+        check("insert prepares complete text and invalidates the candidate cache", ids("klaabud") == [2])
+        index.remove(ids: [2])
+        check("deletion invalidates full-text candidates", ids("klaabud").isEmpty)
+
+        let longTerm = String(repeating: "a", count: 160)
+        index.rebuild(from: [item(1, "algus")], texts: [1: String(repeating: "prefix ", count: 60) + longTerm])
+        let longDisplay = index.display(for: index.search(longTerm)[0])
+        check("context contains and highlights even a term longer than the usual label",
+              longDisplay.text.contains(longTerm) && longDisplay.positions.count == longTerm.utf8.count)
+
+        let fixture = [item(4, "valge aed"), item(3, "valge aednik"), item(2, "õun"), item(1, "ounapuu")]
+        let edits = ["v", "val", "valge", "valge a", "valge\taed", "valge valge", "valge",
+                     "oun", "õun", "õun oun", "oun", "", "app:safari", "valge aed"]
+        index.rebuild(from: fixture)
+        var incremental: [[Int64]] = []
+        for query in edits { incremental.append(ids(query)) }
+        for (query, result) in zip(edits, incremental) {
+            index.rebuild(from: fixture)
+            check("incremental search equals cold search: \(query)", result == ids(query))
+        }
+        index.rebuild(from: [item(2, "õun", app: "SÄFARI"), item(1, "õun", app: "Terminal")])
+        check("app filter remains compatible with full-text terms", ids("app:safari oun") == [2])
+        check("all-whitespace query returns all entries", ids(" \t\n ") == [2, 1])
+
+        let repeated = SearchText(String(repeating: "a", count: 20_000) + " end")
+        let overlap = SubstringMatcher.match(terms: [SearchTerm("aaa"), SearchTerm("end")], text: repeated)
+        check("overlapping repeated substrings find the closest final window", overlap?.span == 7)
+        index.rebuild(from: [])
+    }
+
+    private static func searchStorage() {
+        section("full-text storage loading")
+        do {
+            let db = try Database(path: ":memory:")
+            try db.exec("CREATE TABLE reps (item_id INTEGER, uti TEXT, inline BLOB, blob_key TEXT)")
+            func put(_ id: Int64, _ uti: String, _ text: String?, key: String? = nil) throws {
+                let insert = try db.statement("INSERT INTO reps VALUES (?, ?, ?, ?)")
+                insert.bind(1, id).bind(2, uti).bind(3, text.map { Data($0.utf8) }).bind(4, key)
+                try insert.run()
+            }
+            let plain = "public.utf8-plain-text"
+            let full = String(repeating: "algus ", count: 100) + "klaabud lõpus"
+            let blob = String(repeating: "tekst ", count: 12_000) + "õun lõpus"
+            try put(1, plain, " \n" + full + "\n ")
+            try put(1, "public.html", "<script>not searchable markup</script>")
+            try put(2, plain, nil, key: "plain-blob")
+            try put(3, "public.png", nil, key: "image-blob")
+            try put(4, plain, "not requested")
+            try put(5, plain, nil, key: "missing-blob")
+            var reads: [String] = []
+            let texts = try ItemStore.loadSearchableTexts(db, items: [item(1, "algus"), item(2, "tekst"), item(3, "Image"), item(5, "fallback")]) { key in
+                reads.append(key)
+                return key == "plain-blob" ? Data(blob.utf8) : nil
+            }
+            check("inline full text loads without truncation", texts[1] == full)
+            check("blob-backed full text loads without truncation", texts[2] == blob)
+            check("markup and images are not loaded into search", Set(reads) == ["plain-blob", "missing-blob"])
+            check("only requested history rows are loaded", texts[4] == nil)
+            check("unavailable text leaves the snippet fallback available", texts[5] == nil)
+            let index = SearchIndex.shared
+            index.rebuild(from: [item(1, "algus"), item(2, "tekst"), item(5, "fallback")], texts: texts)
+            check("existing inline history is searchable at its end", index.search("klaabud lõpus").map(\.item.id) == [1])
+            check("existing blob history is searchable at its end", index.search("oun lopus").map(\.item.id) == [2])
+            check("missing text falls back to its saved label", index.search("fallback").map(\.item.id) == [5])
+            let single = try ItemStore.loadSearchableTexts(db, items: [item(1, "algus")]) { _ in
+                check("a single inline insert does not read unrelated blobs", false)
+                return nil
+            }
+            check("single-entry loading is scoped to the new item", single.keys.count == 1 && single[1] == full)
+            index.rebuild(from: [])
+        } catch {
+            check("storage fixtures complete without production services", false, String(describing: error))
+        }
     }
 }

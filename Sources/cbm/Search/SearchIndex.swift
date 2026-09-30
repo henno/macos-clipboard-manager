@@ -2,52 +2,38 @@ import Foundation
 
 struct SearchHit {
     let item: ClipItem
-    let score: Int
     fileprivate let entryIndex: Int
+    fileprivate let relevance: SubstringMatcher.Match
 }
 
-/// The in-memory search index: one entry per history row, holding the folded
-/// snippet bytes, its word-boundary bitset and a character mask.
-///
-/// Two things keep typing instant. The mask rejects most candidates with a
-/// single AND before any scanning happens. And when the query only grows, we
-/// rescore just the previous result set instead of the whole history -- adding a
-/// character to a subsequence query can only ever remove matches, never add
-/// them, so the narrowing is exact rather than approximate.
+/// Full text is loaded and normalized only when the index changes. Keystrokes
+/// scan prepared bytes and never read clipboard representations from disk.
 final class SearchIndex {
     static let shared = SearchIndex()
 
     private struct Entry {
         var item: ClipItem
-        let folded: [UInt8]
-        let boundaries: [UInt8]
-        let mask: UInt32
-        let appFolded: [UInt8]
+        let text: SearchText
+        let appFolded: String
     }
 
-    /// Kept in updatedAt-descending order, which is also the display order for
-    /// an empty query.
     private var entries: [Entry] = []
-
-    // Incremental-narrowing cache.
-    private var cachedTermsKey: String?
-    private var cachedAppKey = ""
+    private var cachedTerms: [[UInt8]] = []
+    private var cachedApp = ""
     private var cachedCandidates: [Int] = []
-
-    // Retained so highlight positions can be recomputed for visible rows only.
-    private var activeTerms: [[UInt8]] = []
+    private var activeTerms: [SearchTerm] = []
 
     private init() {}
 
     // MARK: - Maintenance
 
-    func rebuild(from items: [ClipItem]) {
-        entries = items.map(Self.makeEntry)
+    func rebuild(from items: [ClipItem], texts: [Int64: String] = [:]) {
+        entries = items.map { Self.makeEntry($0, text: texts[$0.id]) }
         invalidate()
     }
 
-    func insert(_ item: ClipItem) {
-        entries.insert(Self.makeEntry(item), at: 0)
+    func insert(_ item: ClipItem, text: String? = nil) {
+        entries.insert(Self.makeEntry(item, text: text), at: 0)
         invalidate()
     }
 
@@ -72,145 +58,119 @@ final class SearchIndex {
 
     var count: Int { entries.count }
 
-    /// Rough resident cost of the index, for the metrics readout.
     var approximateBytes: Int {
-        entries.reduce(0) { $0 + $1.folded.count + $1.boundaries.count + $1.appFolded.count + 96 }
+        entries.reduce(0) { $0 + $1.text.approximateBytes + $1.appFolded.utf8.count + 96 }
     }
 
     private func invalidate() {
-        cachedTermsKey = nil
+        cachedTerms = []
         cachedCandidates = []
     }
 
-    private static func makeEntry(_ item: ClipItem) -> Entry {
-        let original = Array(item.snippet.utf8)
-        let folded = TextFold.fold(original)
-        return Entry(
-            item: item,
-            folded: folded,
-            boundaries: TextFold.boundaries(original: original),
-            mask: TextFold.mask(folded),
-            appFolded: TextFold.fold(Array((item.sourceName ?? "").utf8)))
+    private static func makeEntry(_ item: ClipItem, text: String?) -> Entry {
+        Entry(item: item, text: SearchText(text ?? item.snippet),
+              appFolded: SearchText.fold(item.sourceName ?? ""))
     }
 
     // MARK: - Query
 
-    /// `app:` narrows to a source application; everything else is a fuzzy term,
-    /// and every term has to match.
     private struct Query {
-        var appKey = ""
-        var appFolded: [UInt8] = []
-        var termsKey = ""
-        var terms: [[UInt8]] = []
-        var masks: [UInt32] = []
-        var isEmpty: Bool { terms.isEmpty && appFolded.isEmpty }
+        var app = ""
+        var terms: [SearchTerm] = []
+        var isEmpty: Bool { terms.isEmpty && app.isEmpty }
     }
 
     private func parse(_ raw: String) -> Query {
-        var q = Query()
-        var termStrings: [String] = []
-        for token in raw.split(separator: " ", omittingEmptySubsequences: true) {
+        var query = Query()
+        var seen = Set<String>()
+        for token in raw.split(whereSeparator: { $0.isWhitespace }) {
             if token.lowercased().hasPrefix("app:") {
-                q.appKey = String(token.dropFirst(4))
-                q.appFolded = TextFold.fold(Array(q.appKey.utf8))
+                query.app = SearchText.fold(String(token.dropFirst(4)))
             } else {
-                termStrings.append(String(token))
+                let term = SearchTerm(String(token))
+                if !term.bytes.isEmpty, seen.insert(term.exactString).inserted {
+                    query.terms.append(term)
+                }
             }
         }
-        q.termsKey = termStrings.joined(separator: " ")
-        q.terms = termStrings.map { TextFold.fold(Array($0.utf8)) }
-        q.masks = q.terms.map(TextFold.mask)
-        return q
+        return query
     }
 
     func search(_ raw: String) -> [SearchHit] {
         let started = CFAbsoluteTimeGetCurrent()
-        let q = parse(raw)
-        activeTerms = q.terms
+        let query = parse(raw)
+        activeTerms = query.terms
+        let keys = query.terms.map(\.bytes)
 
-        if q.isEmpty {
+        if query.isEmpty {
             invalidate()
+            let relevance = SubstringMatcher.Match(exactTerms: 0, wholeTerms: 0, span: 0, ranges: [])
             let hits = entries.enumerated().map {
-                SearchHit(item: $0.element.item, score: 0, entryIndex: $0.offset)
+                SearchHit(item: $0.element.item, entryIndex: $0.offset, relevance: relevance)
             }
             record(started: started, candidates: entries.count)
             return hits
         }
 
-        // Reuse the previous result set when the query only grew and the app
-        // filter is unchanged; otherwise scan everything.
-        let candidates: [Int]
-        if let cachedKey = cachedTermsKey,
-           cachedAppKey == q.appKey,
-           !cachedKey.isEmpty,
-           q.termsKey.hasPrefix(cachedKey) {
-            candidates = cachedCandidates
-        } else {
-            candidates = Array(entries.indices)
-        }
-
+        // A cache is safe only when every previous term is still a prefix of
+        // the corresponding new term. Editing whitespace or dropping duplicate
+        // terms must not hide results that a cold search would find.
+        let narrows = !cachedTerms.isEmpty && cachedApp == query.app
+            && keys.count >= cachedTerms.count
+            && zip(cachedTerms, keys).allSatisfy { old, new in new.starts(with: old) }
+        let candidates = narrows ? cachedCandidates : Array(entries.indices)
         var hits: [SearchHit] = []
-        hits.reserveCapacity(min(candidates.count, 256))
         var surviving: [Int] = []
-        surviving.reserveCapacity(min(candidates.count, 256))
-
-        outer: for idx in candidates {
+        for idx in candidates {
             let entry = entries[idx]
-            if !q.appFolded.isEmpty {
-                guard contains(entry.appFolded, q.appFolded) else { continue }
-            }
-            var total = 0
-            for (t, term) in q.terms.enumerated() {
-                // One AND rejects most rows without touching the text at all.
-                guard q.masks[t] & entry.mask == q.masks[t] else { continue outer }
-                guard let s = FuzzyMatcher.score(
-                    query: term, text: entry.folded, boundaries: entry.boundaries)
-                else { continue outer }
-                total += s
-            }
+            guard query.app.isEmpty || entry.appFolded.contains(query.app),
+                  let relevance = SubstringMatcher.match(terms: query.terms, text: entry.text) else { continue }
             surviving.append(idx)
-            hits.append(SearchHit(item: entry.item, score: total, entryIndex: idx))
+            hits.append(SearchHit(item: entry.item, entryIndex: idx, relevance: relevance))
         }
-
-        cachedTermsKey = q.termsKey
-        cachedAppKey = q.appKey
+        cachedTerms = keys
+        cachedApp = query.app
         cachedCandidates = surviving
-
-        // Score first, recency second, so equally good matches stay in the order
-        // the user last touched them.
         hits.sort {
-            $0.score != $1.score ? $0.score > $1.score : $0.item.updatedAt > $1.item.updatedAt
+            if $0.relevance.ranksBefore($1.relevance) { return true }
+            if $1.relevance.ranksBefore($0.relevance) { return false }
+            if $0.item.updatedAt != $1.item.updatedAt { return $0.item.updatedAt > $1.item.updatedAt }
+            return $0.item.id > $1.item.id
         }
         record(started: started, candidates: candidates.count)
         return hits
     }
 
-    /// Byte offsets in the snippet to highlight. Recomputed per visible row.
-    func highlightPositions(for hit: SearchHit) -> [Int] {
-        guard hit.entryIndex < entries.count, !activeTerms.isEmpty else { return [] }
+    /// A hit beyond the original label gets a short context around the best
+    /// match. The original item is retained for preview, copying and pasting.
+    func display(for hit: SearchHit) -> (text: String, positions: [Int]) {
+        guard hit.entryIndex < entries.count else { return (hit.item.snippet, []) }
         let entry = entries[hit.entryIndex]
-        guard entry.item.id == hit.item.id else { return [] }
-        var out: [Int] = []
-        for term in activeTerms {
-            if let m = FuzzyMatcher.match(
-                query: term, text: entry.folded, boundaries: entry.boundaries) {
-                out.append(contentsOf: m.positions)
-            }
+        guard entry.item.id == hit.item.id, !activeTerms.isEmpty else { return (hit.item.snippet, []) }
+        let ranges = hit.relevance.ranges.map(entry.text.originalRange)
+        let label: String
+        if ranges.allSatisfy({ $0.upperBound <= hit.item.snippet.utf8.count }) {
+            label = hit.item.snippet
+        } else if let first = ranges.min(by: { $0.lowerBound < $1.lowerBound }) {
+            let original = entry.text.original
+            let byteIndex = original.utf8.index(original.utf8.startIndex, offsetBy: first.lowerBound)
+            let anchor = String.Index(byteIndex, within: original) ?? original.startIndex
+            let start = original.index(anchor, offsetBy: -24, limitedBy: original.startIndex) ?? original.startIndex
+            let contextEnd = original.index(start, offsetBy: 120, limitedBy: original.endIndex) ?? original.endIndex
+            let matchByteEnd = original.utf8.index(original.utf8.startIndex, offsetBy: first.upperBound)
+            let matchEnd = String.Index(matchByteEnd, within: original) ?? original.endIndex
+            let end = max(contextEnd, matchEnd)
+            label = (start > original.startIndex ? "… " : "") + original[start..<end]
+                + (end < original.endIndex ? " …" : "")
+        } else {
+            label = hit.item.snippet
         }
-        return out
+        return (label, SubstringMatcher.highlightPositions(terms: activeTerms, text: SearchText(label)))
     }
 
-    private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
-        guard !needle.isEmpty, haystack.count >= needle.count else { return false }
-        let limit = haystack.count - needle.count
-        var i = 0
-        while i <= limit {
-            var k = 0
-            while k < needle.count, haystack[i + k] == needle[k] { k += 1 }
-            if k == needle.count { return true }
-            i += 1
-        }
-        return false
+    func highlightPositions(for hit: SearchHit) -> [Int] {
+        guard hit.entryIndex < entries.count, entries[hit.entryIndex].item.id == hit.item.id else { return [] }
+        return SubstringMatcher.highlightPositions(terms: activeTerms, text: SearchText(hit.item.snippet))
     }
 
     private func record(started: CFAbsoluteTime, candidates: Int) {

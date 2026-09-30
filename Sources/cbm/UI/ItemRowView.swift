@@ -53,6 +53,7 @@ final class ItemRowView: NSTableCellView {
 
     private var item: ClipItem?
     private var positions: [Int] = []
+    private var displayTitle: String?
 
     /// Re-render on selection so the highlight colour stays legible against the
     /// selected-row background.
@@ -60,9 +61,10 @@ final class ItemRowView: NSTableCellView {
         didSet { render() }
     }
 
-    func configure(with item: ClipItem, highlight positions: [Int]) {
+    func configure(with item: ClipItem, highlight positions: [Int], title: String? = nil) {
         self.item = item
         self.positions = positions
+        displayTitle = title
         render()
     }
 
@@ -81,7 +83,7 @@ final class ItemRowView: NSTableCellView {
         }
 
         titleLabel.attributedStringValue = Self.title(
-            for: item, positions: positions, selected: selected)
+            text: displayTitle ?? item.snippet, positions: positions, selected: selected)
 
         var parts: [String] = []
         if let name = item.sourceName, !name.isEmpty { parts.append(name) }
@@ -99,11 +101,12 @@ final class ItemRowView: NSTableCellView {
     /// that is what the matcher works in. Attributed strings want UTF-16 ranges,
     /// so we walk the scalars once and translate.
     private static func title(
-        for item: ClipItem, positions: [Int], selected: Bool
+        text: String, positions: [Int], selected: Bool
     ) -> NSAttributedString {
         // Control characters become spaces, one byte for one byte, so the
         // offsets computed above stay valid.
-        let flattened = String(item.snippet.map { $0 == "\n" || $0 == "\r" || $0 == "\t" ? " " : $0 })
+        let flattened = text.replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\t", with: " ")
 
         let base = NSMutableAttributedString(
             string: flattened,

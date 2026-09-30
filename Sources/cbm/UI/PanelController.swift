@@ -89,7 +89,7 @@ final class PanelController: NSObject {
         guard !indexLoaded else { return }
         indexLoaded = true
         let items = ItemStore.shared.recent()
-        SearchIndex.shared.rebuild(from: items)
+        SearchIndex.shared.rebuild(from: items, texts: ItemStore.shared.searchableTexts(for: items))
         warmFavicons(for: items)
     }
 
@@ -247,7 +247,7 @@ final class PanelController: NSObject {
     /// the first panel open there is nothing to keep up to date.
     func storeDidInsert(_ item: ClipItem) {
         guard indexLoaded else { return }
-        SearchIndex.shared.insert(item)
+        SearchIndex.shared.insert(item, text: ItemStore.shared.searchableTexts(for: [item])[item.id])
         warmFavicons(for: [item])
         refreshIfVisible()
     }
@@ -420,7 +420,8 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
                 return v
             }()
         let hit = hits[row]
-        view.configure(with: hit.item, highlight: SearchIndex.shared.highlightPositions(for: hit))
+        let display = SearchIndex.shared.display(for: hit)
+        view.configure(with: hit.item, highlight: display.positions, title: display.text)
         return view
     }
 

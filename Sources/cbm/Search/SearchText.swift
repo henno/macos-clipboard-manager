@@ -36,7 +36,12 @@ struct SearchText {
             // Plain ASCII needs neither a Character allocation nor a Foundation
             // fold. Hold an ASCII character before non-ASCII back for grapheme
             // processing, so a following combining accent stays attached.
-            if byte < 128 && (originalOffset + 1 == originalFolded.count || originalFolded[originalOffset + 1] < 128) {
+            // CRLF is also one grapheme: consuming only CR would leave the
+            // slow path at LF, where String.Index(_:within:) returns nil.
+            let startsCRLF = byte == 13 && originalOffset + 1 < originalFolded.count
+                && originalFolded[originalOffset + 1] == 10
+            if byte < 128 && !startsCRLF
+                && (originalOffset + 1 == originalFolded.count || originalFolded[originalOffset + 1] < 128) {
                 let position = folded.count
                 folded.append(byte)
                 if words.count <= (position >> 3) { words.append(0) }
@@ -52,7 +57,8 @@ struct SearchText {
             let end = text.index(after: characterIndex).samePosition(in: utf8)!
             let width = utf8.distance(from: sourceIndex, to: end)
             let part: [UInt8]
-            if let ascii = character.asciiValue {
+            // Character.asciiValue reports LF for CRLF; do not collapse it.
+            if width == 1, let ascii = character.asciiValue {
                 part = [ascii >= 65 && ascii <= 90 ? ascii + 32 : ascii]
             } else {
                 onlyASCII = false

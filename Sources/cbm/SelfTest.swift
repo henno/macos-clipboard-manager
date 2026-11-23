@@ -305,6 +305,16 @@ enum SelfTest {
         check("canonically equivalent accents rank equally", ids("õun") == [2, 1])
         check("decomposed accents keep their original highlight range",
               index.highlightPositions(for: index.search("õun")[1]) == Array(0..<decomposed.utf8.count))
+        for sample in ["a\r\nõun", "\r\n🙂", "a\r\nO\u{0303}UN", "a\r\nb\r\nÕUN", "a\r\nb"] {
+            let prepared = SearchText(sample)
+            check("CRLF before Unicode folds without splitting a grapheme",
+                  prepared.bytes == Array(SearchText.fold(sample).utf8),
+                  "\(Array(sample.utf8)): \(prepared.bytes) vs \(Array(SearchText.fold(sample).utf8))")
+        }
+        index.rebuild(from: [item(1, "first\r\nÕUN")])
+        check("search handles CRLF before Unicode", ids("oun") == [1])
+        check("highlight offsets survive CRLF before Unicode",
+              index.highlightPositions(for: index.search("oun")[0]) == Array(7..<11))
         let expanded = SearchText("ßa")
         check("same-length Unicode expansions map partial matches to complete characters",
               expanded.originalRange(1..<3) == 0..<3 && expanded.originalRange(0..<1) == 0..<2)

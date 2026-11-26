@@ -47,6 +47,7 @@ enum Paster {
         ClipboardMonitor.shared.write { pb in
             writeItems(payload, kind: item.kind, to: pb)
         } completion: {
+            ItemStore.shared.touch(id: item.id)
             guard mode != .copyOnly else { return }
             guard isTrusted else {
                 Log.ui("no Accessibility permission; left it on the clipboard")

@@ -465,6 +465,22 @@ final class ItemStore {
         return texts
     }
 
+    func touch(id: Int64) {
+        queue.async {
+            guard let db = self.db else { return }
+            let now = Date().timeIntervalSince1970
+            do {
+                let update = try db.statement("UPDATE items SET updated_at = ? WHERE id = ?")
+                update.bind(1, now).bind(2, id)
+                try update.run()
+                DispatchQueue.main.async { self.onTouch?(id, now) }
+                self.postDidChange()
+            } catch {
+                Log.error("touch failed: \(error)")
+            }
+        }
+    }
+
     func recent(limit: Int = 5000) -> [ClipItem] {
         queue.sync {
             guard let db else { return [] }
